@@ -1,0 +1,27 @@
+import glob
+import os.path
+
+# import variables from other scons files
+Import( '*' )
+
+raise NotImplementedError("SCONS BUILD NOT YET AVAILABLE")
+
+if have_qtkitcapture:
+	env = masterEnv.Clone()
+	# take driver name from directory name, replace if you don't like the result
+	driverName = "qtkitcapture"
+
+	# automatically glob files
+	headers = []
+	sources = 'QTKitCapture.mm'
+
+	# append driver specific build options here
+	env.AppendUnique( **utvision_all_options )
+	env.AppendUnique( **utdataflow_all_options )	
+	env.AppendUnique( **qtkitcapture_options )
+
+	# compile driver
+	setupSingleComponentBuild(env, sources, driverName,'qtkitcapture')
+
+	# also create a visual studio project for the driver
+	createVisualStudioProject(env, sources, headers, driverName)
