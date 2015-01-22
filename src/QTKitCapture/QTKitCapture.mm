@@ -120,127 +120,6 @@ didDropVideoFrameWithSampleBuffer:(QTSampleBuffer *)sampleBuffer
 
 
 
-@implementation CaptureDelegate
-
-- (id)init {
-    self = [super init];
-    if (self) {
-        imagedata = NULL;
-        currSize = 0;
-        image = NULL;
-        _owner = NULL;
-    }
-    return self;
-}
-
-
--(void)dealloc {
-    if (imagedata != NULL) free(imagedata);
-    cvReleaseImage(&image);
-    [super dealloc];
-}
-
-- (void)captureOutput:(QTCaptureOutput *)captureOutput
-  didOutputVideoFrame:(CVImageBufferRef)videoFrame
-     withSampleBuffer:(QTSampleBuffer *)sampleBuffer
-       fromConnection:(QTCaptureConnection *)connection {
-    (void)captureOutput;
-    (void)sampleBuffer;
-    (void)connection;
-
-    CVBufferRetain(videoFrame);
-    CVImageBufferRef imageBufferToRelease  = mCurrentImageBuffer;
-
-    
-    // optimize START
-    
-    @synchronized (self) {
-        mCurrentImageBuffer = videoFrame;
-    }
-
-    CVBufferRelease(imageBufferToRelease);
-
-    // send measurement here
-    CVPixelBufferRef pixels;
-
-    @synchronized (self){
-        pixels = CVBufferRetain(mCurrentImageBuffer);
-    }
-    
-    // optimize Stop
-    
-    
-    // get timestamp early
-    Ubitrack::Measurement::Timestamp timeStamp = Ubitrack::Measurement::now();
-
-    CVPixelBufferLockBaseAddress(pixels, 0);
-    uint32_t* baseaddress = (uint32_t*)CVPixelBufferGetBaseAddress(pixels);
-
-    size_t width = CVPixelBufferGetWidth(pixels);
-    size_t height = CVPixelBufferGetHeight(pixels);
-    size_t rowBytes = CVPixelBufferGetBytesPerRow(pixels);
-
-    if (rowBytes != 0) {
-        
-        if (currSize != rowBytes*height*sizeof(char)) {
-            currSize = rowBytes*height*sizeof(char);
-            if (imagedata != NULL) free(imagedata);
-            imagedata = (char*)malloc(currSize);
-        }
-
-        memcpy(imagedata, baseaddress, currSize);
-
-        if (image == NULL) {
-            image = cvCreateImageHeader(cvSize((int)width,(int)height), IPL_DEPTH_8U, 4);
-        }
-        image->width = (int)width;
-        image->height = (int)height;
-        image->nChannels = 4;
-        image->depth = IPL_DEPTH_8U;
-        image->widthStep = (int)rowBytes;
-        image->imageData = imagedata;
-        image->imageSize = (int)currSize;
-
-        // here we need to send the image
-        if (_owner != NULL) {
-            _owner->sendImage(timestamp, image);
-        }
-
-    }
-
-    CVPixelBufferUnlockBaseAddress(pixels, 0);
-    CVBufferRelease(pixels);
-
-
-}
-- (void)captureOutput:(QTCaptureOutput *)captureOutput
-  didDropVideoFrameWithSampleBuffer:(QTSampleBuffer *)sampleBuffer
-       fromConnection:(QTCaptureConnection *)connection {
-    (void)captureOutput;
-    (void)sampleBuffer;
-    (void)connection;
-    LOG4CPP_ERROR( logger, "Camera dropped frame!" );
-}
-
-
-#pragma mark Public methods
-
-- (void)registerOwner:(Ubitrack::Drivers::QTKitCapture*)owner {
-    [_lock lock];
-    _owner = owner;
-    [_lock unlock];
-}
-
-
-@end
-
-
-
-namespace {
-
-
-} // anonymous namespace
-
 namespace Ubitrack { namespace Drivers {
 
 /**
@@ -272,7 +151,7 @@ public:
     /** stops the camera */
     void stop();
     
-    void getImage(Ubitrack::Measurement::Timestamp timeStamp, IplImage* bgr_image);
+    void sendImage(Ubitrack::Measurement::Timestamp timeStamp, IplImage* bgr_image);
 
     /** handler method for incoming pull requests */
 	Measurement::Matrix3x3 getIntrinsic( Measurement::Timestamp t )
@@ -430,8 +309,6 @@ QTKitCapture::QTKitCapture( const std::string& sName, boost::shared_ptr< Graph::
         }
 
         [localpool drain];
-    }
-
     } else {
         LOG4CPP_ERROR( logger, "QTKit no device." );
         [localpool drain];
@@ -440,14 +317,11 @@ QTKitCapture::QTKitCapture( const std::string& sName, boost::shared_ptr< Graph::
 }
 
 
-}
-
-
 QTKitCapture::~QTKitCapture()
 {
     NSAutoreleasePool* localpool = [[NSAutoreleasePool alloc] init];
 
-    if (m_isrunning) {
+    if (m_running) {
         [mCaptureSession stopRunning];
     }
 
@@ -483,7 +357,7 @@ void QTKitCapture::stop()
     }
 }
 
-void QTKitCapture::getImage(Ubitrack::Measurement::Timestamp timeStamp, IplImage* image) {
+void QTKitCapture::sendImage(Ubitrack::Measurement::Timestamp timeStamp, IplImage* image) {
     
     boost::shared_ptr< Vision::Image > pColorImage;
     pColorImage.reset(new Vision::Image(image->width, image->height, 3 ) );
@@ -503,6 +377,129 @@ void QTKitCapture::getImage(Ubitrack::Measurement::Timestamp timeStamp, IplImage
 }
 
 } } // namespace Ubitrack::Driver
+
+
+// implementation of delegate
+
+@implementation CaptureDelegate
+
+- (id)init {
+    self = [super init];
+    if (self) {
+        imagedata = NULL;
+        currSize = 0;
+        image = NULL;
+        _owner = NULL;
+    }
+    return self;
+}
+
+
+-(void)dealloc {
+    if (imagedata != NULL) free(imagedata);
+    cvReleaseImage(&image);
+    [super dealloc];
+}
+
+- (void)captureOutput:(QTCaptureOutput *)captureOutput
+        didOutputVideoFrame:(CVImageBufferRef)videoFrame
+        withSampleBuffer:(QTSampleBuffer *)sampleBuffer
+        fromConnection:(QTCaptureConnection *)connection {
+    (void)captureOutput;
+    (void)sampleBuffer;
+    (void)connection;
+
+    CVBufferRetain(videoFrame);
+    CVImageBufferRef imageBufferToRelease  = mCurrentImageBuffer;
+
+
+    // optimize START
+
+    @synchronized (self) {
+        mCurrentImageBuffer = videoFrame;
+    }
+
+    CVBufferRelease(imageBufferToRelease);
+
+    // send measurement here
+    CVPixelBufferRef pixels;
+
+    @synchronized (self){
+        pixels = CVBufferRetain(mCurrentImageBuffer);
+    }
+
+    // optimize Stop
+
+
+    // get timestamp early
+    Ubitrack::Measurement::Timestamp timestamp = Ubitrack::Measurement::now();
+
+    CVPixelBufferLockBaseAddress(pixels, 0);
+    uint32_t* baseaddress = (uint32_t*)CVPixelBufferGetBaseAddress(pixels);
+
+    size_t width = CVPixelBufferGetWidth(pixels);
+    size_t height = CVPixelBufferGetHeight(pixels);
+    size_t rowBytes = CVPixelBufferGetBytesPerRow(pixels);
+
+    if (rowBytes != 0) {
+
+        if (currSize != rowBytes*height*sizeof(char)) {
+            currSize = rowBytes*height*sizeof(char);
+            if (imagedata != NULL) free(imagedata);
+            imagedata = (char*)malloc(currSize);
+        }
+
+        memcpy(imagedata, baseaddress, currSize);
+
+        if (image == NULL) {
+            image = cvCreateImageHeader(cvSize((int)width,(int)height), IPL_DEPTH_8U, 4);
+        }
+
+        image->width = (int)width;
+        image->height = (int)height;
+        image->nChannels = 4;
+        image->depth = IPL_DEPTH_8U;
+        image->widthStep = (int)rowBytes;
+        image->imageData = imagedata;
+        image->imageSize = (int)currSize;
+
+        // here we need to send the image
+        if (_owner != NULL) {
+            _owner->sendImage(timestamp, image);
+        }
+
+    }
+
+    CVPixelBufferUnlockBaseAddress(pixels, 0);
+    CVBufferRelease(pixels);
+
+
+}
+
+- (void)captureOutput:(QTCaptureOutput *)captureOutput
+        didDropVideoFrameWithSampleBuffer:(QTSampleBuffer *)sampleBuffer
+        fromConnection:(QTCaptureConnection *)connection {
+    (void)captureOutput;
+    (void)sampleBuffer;
+    (void)connection;
+    LOG4CPP_ERROR( logger, "Camera dropped frame!" );
+}
+
+
+#pragma mark Public methods
+
+- (void)registerOwner:(Ubitrack::Drivers::QTKitCapture*)owner {
+    [_lock lock];
+    _owner = owner;
+    [_lock unlock];
+}
+
+
+@end
+
+
+
+
 
 UBITRACK_REGISTER_COMPONENT( Dataflow::ComponentFactory* const cf ) {
 	cf->registerComponent< Ubitrack::Drivers::QTKitCapture > ( "QTKitCapture" );
