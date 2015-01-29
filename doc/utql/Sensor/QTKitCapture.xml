@@ -49,9 +49,9 @@
 				</Description>
 			</Attribute>
 
-			<Attribute name="cameraBusIndex" default="-1" xsi:type="IntAttributeDeclarationType" displayName="camera bus index">
+			<Attribute name="cameraUUID" default="" xsi:type="StringAttributeDeclarationType" displayName="camera uuid">
 				<Description>
-					<h:p>The camera bus index.</h:p>
+					<h:p>The camera UUID.</h:p>
 				</Description>
 			</Attribute>
 
@@ -124,11 +124,11 @@
 				</Description>
 			</Attribute>
 
-			<Attribute name="cameraBusIndex" default="-1" xsi:type="IntAttributeDeclarationType" displayName="camera bus index">
-				<Description>
-					<h:p>The camera bus index.</h:p>
-				</Description>
-			</Attribute>
+            <Attribute name="cameraUUID" default="" xsi:type="StringAttributeDeclarationType" displayName="camera uuid">
+                <Description>
+                    <h:p>The camera UUID.</h:p>
+                </Description>
+            </Attribute>
 
             <Attribute name="width" default="0" xsi:type="IntAttributeDeclarationType" displayName="image width">
                 <Description>

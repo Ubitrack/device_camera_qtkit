@@ -43,6 +43,7 @@
 #include <boost/thread.hpp>
 #include <boost/bind.hpp>
 #include <boost/scoped_ptr.hpp>
+#include <boost/shared_ptr.hpp>
 
 #include <utDataflow/PushSupplier.h>
 #include <utDataflow/PullSupplier.h>
@@ -77,9 +78,9 @@ using namespace Ubitrack::Vision;
 
 /*****************************************************************************
  *
- * CaptureDelegate Implementation.
+ * UTCaptureDelegate Implementation.
  *
- * CaptureDelegate is notified on a separate thread by the OS whenever there
+ * UTCaptureDelegate is notified on a separate thread by the OS whenever there
  *   is a new frame. When "updateImage" is called from the main thread, it
  *   copies this new frame into an IplImage, but only if this frame has not
  *   been copied before. When "getOutput" is called from the main thread,
@@ -94,25 +95,11 @@ namespace Ubitrack {
 }
 
 
-@interface CaptureDelegate : NSObject
+@interface UTCaptureDelegate : NSObject
 {
-    int newFrame;
-    CVImageBufferRef  mCurrentImageBuffer;
-    char* imagedata;
-    IplImage* image;
-    size_t currSize;
     Ubitrack::Drivers::QTKitCapture* _owner;
     NSLock* _lock;
 }
-
-- (void)captureOutput:(QTCaptureOutput *)captureOutput
-  didOutputVideoFrame:(CVImageBufferRef)videoFrame
-     withSampleBuffer:(QTSampleBuffer *)sampleBuffer
-       fromConnection:(QTCaptureConnection *)connection;
-
-- (void)captureOutput:(QTCaptureOutput *)captureOutput
-didDropVideoFrameWithSampleBuffer:(QTSampleBuffer *)sampleBuffer
-       fromConnection:(QTCaptureConnection *)connection;
 
 - (void)registerOwner:(Ubitrack::Drivers::QTKitCapture*)owner;
 
@@ -151,8 +138,6 @@ public:
     /** stops the camera */
     void stop();
     
-    void sendImage(Ubitrack::Measurement::Timestamp timeStamp, IplImage* bgr_image);
-
     /** handler method for incoming pull requests */
 	Measurement::Matrix3x3 getIntrinsic( Measurement::Timestamp t )
 	{
@@ -163,15 +148,27 @@ public:
 		}
 	}
 
+    void receiveFrame (void*pixelBufferBase, size_t width, size_t height, size_t size, Ubitrack::Measurement::Timestamp timestamp);
+
 protected:
 	// qtkit stuff
     QTCaptureSession            *mCaptureSession;
     QTCaptureDeviceInput        *mCaptureDeviceInput;
     QTCaptureDecompressedVideoOutput    *mCaptureDecompressedVideoOutput;
-    CaptureDelegate* capture;
+    QTCaptureDevice             *mCaptureDevice;
+    UTCaptureDelegate           *m_CaptureDelegate;
 
-    // camera number
-    int m_cameraBusIndex;
+    unsigned char* m_imageBuffer;
+    size_t         m_imageBufferSize;
+
+    void initializeCamera();
+    QTCaptureDevice* defaultCamDevice();
+    QTCaptureDevice * camDevice(const char* uid);
+    void configureOutput ();
+    void destroySession();
+
+    // camera UUID
+    std::string m_cameraUUID;
     
 	// the image width
 	int m_width;
@@ -179,12 +176,22 @@ protected:
 	// the image height
 	int m_height;
 
-
 	// trigger flash
 	bool m_disable_autostart;
 
 	// shift timestamps (ms)
 	int m_timeOffset;
+
+    // thread main loop
+    void ThreadProc();
+
+    // the thread
+    boost::scoped_ptr< boost::thread > m_Thread;
+
+    // stop the thread?
+    volatile bool m_bStop;
+    volatile bool m_bCaptureThreadReady;
+
 
 	/** undistorter */
 	boost::shared_ptr<Vision::Undistortion> m_undistorter;
@@ -198,19 +205,25 @@ protected:
 
 QTKitCapture::QTKitCapture( const std::string& sName, boost::shared_ptr< Graph::UTQLSubgraph > subgraph )
 	: Dataflow::Component( sName )
-	, m_cameraBusIndex( -1 )
+	, m_cameraUUID( "" )
 	, m_width( 0 )
 	, m_height( 0 )
     , m_disable_autostart( false )
+    , m_bStop( false )
+    , m_bCaptureThreadReady( false )
 	, m_timeOffset( 0 )
 	, m_outPort( "Output", *this )
 	, m_colorOutPort( "ColorOutput", *this )
 	, m_intrinsicsPort( "Intrinsics", *this, boost::bind( &QTKitCapture::getIntrinsic, this, _1 ) )
+    , m_imageBufferSize(0)
+    , mCaptureSession(NULL)
+    , mCaptureDeviceInput(NULL)
+    , mCaptureDecompressedVideoOutput(NULL)
+    , mCaptureDevice(NULL)
+    , m_CaptureDelegate(NULL)
+    , m_imageBuffer(NULL)
 {
-	subgraph->m_DataflowAttributes.getAttributeData( "cameraBusIndex", m_cameraBusIndex );
-	if (m_cameraBusIndex == -1)
-		UBITRACK_THROW( "Need to specify either cameraBusIndex" );
-
+    m_cameraUUID = subgraph->m_DataflowAttributes.getAttributeString( "cameraUUID" );
 	subgraph->m_DataflowAttributes.getAttributeData( "width", m_width );
 	subgraph->m_DataflowAttributes.getAttributeData( "height", m_height );
 
@@ -225,124 +238,210 @@ QTKitCapture::QTKitCapture( const std::string& sName, boost::shared_ptr< Graph::
 	std::string distortionFile = subgraph->m_DataflowAttributes.getAttributeString( "distortionFile" );
 
 	m_undistorter.reset(new Vision::Undistortion(intrinsicFile, distortionFile));
+}
 
-    // QTKit setup
+QTKitCapture::~QTKitCapture()
+{
+    destroySession();
+}
+
+void QTKitCapture::initializeCamera() {
+    // initialize qtkit m_CaptureDelegate
+    LOG4CPP_INFO(logger, "Initialize QTKit.");
+
     mCaptureSession = nil;
     mCaptureDeviceInput = nil;
     mCaptureDecompressedVideoOutput = nil;
-    capture = nil;
-    
+    m_CaptureDelegate = nil;
 
-    NSAutoreleasePool* localpool = [[NSAutoreleasePool alloc] init];
+    // need uid
+    const char* uid = NULL;
+    if (m_cameraUUID != "") {
+        uid = m_cameraUUID.c_str();
+    }
 
-    capture = [[CaptureDelegate alloc] init];
-    [capture registerOwner:this];
-
-    QTCaptureDevice *device;
-    NSArray* devices = [[[QTCaptureDevice inputDevicesWithMediaType:QTMediaTypeVideo]
-    arrayByAddingObjectsFromArray:[QTCaptureDevice inputDevicesWithMediaType:QTMediaTypeMuxed]] retain];
-
-    if ([devices count] == 0) {
-        LOG4CPP_ERROR( logger, "QTKit didn't find any attached Video Input Devices!" );
-        [localpool drain];
+    mCaptureSession = [[QTCaptureSession alloc] init];
+    mCaptureDevice = camDevice(uid);
+    if (! mCaptureDevice ) {
+        [mCaptureSession release];
+        mCaptureSession = nil;
         return;
     }
 
-    if (m_cameraBusIndex >= 0) {
-        NSUInteger nCameras = [devices count];
-        if( (NSUInteger)m_cameraBusIndex >= nCameras ) {
-            LOG4CPP_ERROR( logger, "QTKit invalid cameraBusIndex" );
-            [localpool drain];
-            return;
-        }
-        device = [devices objectAtIndex:m_cameraBusIndex] ;
-    } else {
-        device = [QTCaptureDevice defaultInputDeviceWithMediaType:QTMediaTypeVideo]  ;
-    }
+    [mCaptureDevice retain];
+
+    LOG4CPP_INFO(logger, "Got camera: "
+            << ([[mCaptureDevice localizedDisplayName] UTF8String])
+            << " UUID "<< ([[mCaptureDevice uniqueID] UTF8String]));
+
     int success;
     NSError* error;
 
-    if (device) {
+    if (mCaptureDevice) {
+        LOG4CPP_INFO(logger, "QTKit - Found device.");
 
-        success = [device open: &error];
+        success = [mCaptureDevice open: &error];
         if (!success) {
             LOG4CPP_ERROR(logger, "QTKit failed to open a Video Capture Device");
-            [localpool drain];
+            // destroySession();
             return;
         }
 
-        mCaptureDeviceInput = [[QTCaptureDeviceInput alloc] initWithDevice: device];
-        mCaptureSession = [[QTCaptureSession alloc] init];
+        mCaptureDeviceInput = [[QTCaptureDeviceInput alloc] initWithDevice: mCaptureDevice];
+        if (! mCaptureDeviceInput ) {
+            LOG4CPP_ERROR(logger, "QTKit input not received");
+            // destroySession();
+            return;
+        }
+        [mCaptureDeviceInput retain];
+
 
         success = [mCaptureSession addInput: mCaptureDeviceInput error: &error];
-
         if (!success) {
             LOG4CPP_ERROR(logger, "QTKit failed to start capture session with opened Capture Device");
-            [localpool drain];
+            // destroySession();
             return;
         }
 
-
+        m_CaptureDelegate = [[UTCaptureDelegate alloc] init];
+        [m_CaptureDelegate registerOwner:this];
         mCaptureDecompressedVideoOutput = [[QTCaptureDecompressedVideoOutput alloc] init];
-        [mCaptureDecompressedVideoOutput setDelegate: capture];
-        NSDictionary *pixelBufferOptions;
-        if (m_width > 0 && m_height > 0) {
-            pixelBufferOptions = [NSDictionary dictionaryWithObjectsAndKeys: [NSNumber numberWithDouble: 1.0 * m_width], (id) kCVPixelBufferWidthKey,
-                                  [NSNumber numberWithDouble: 1.0 * m_height], (id) kCVPixelBufferHeightKey,
-                                  //[NSNumber numberWithUnsignedInt:k32BGRAPixelFormat], (id)kCVPixelBufferPixelFormatTypeKey,
-                                  [NSNumber numberWithUnsignedInt: kCVPixelFormatType_32BGRA], (id) kCVPixelBufferPixelFormatTypeKey, nil];
-        } else {
-            pixelBufferOptions = [NSDictionary dictionaryWithObjectsAndKeys: [NSNumber numberWithUnsignedInt: kCVPixelFormatType_32BGRA], (id) kCVPixelBufferPixelFormatTypeKey, nil];
-        }
-        [mCaptureDecompressedVideoOutput setPixelBufferAttributes: pixelBufferOptions];
 
-#if QTKIT_VERSION_MAX_ALLOWED >= QTKIT_VERSION_7_6_3
-        [mCaptureDecompressedVideoOutput setAutomaticallyDropsLateVideoFrames: YES];
-#endif
+        configureOutput();
 
+        [mCaptureDecompressedVideoOutput setDelegate: m_CaptureDelegate];
 
         success = [mCaptureSession addOutput: mCaptureDecompressedVideoOutput error: &error];
         if (!success) {
             LOG4CPP_ERROR(logger, "QTKit failed to add Output to Capture Session");
-            [localpool drain];
             return;
         }
+        LOG4CPP_INFO(logger, "QTKit - device setup complete.");
 
-        [localpool drain];
+    }}
+
+QTCaptureDevice * QTKitCapture::defaultCamDevice()
+{
+    LOG4CPP_INFO(logger, "Requesting default device ");
+    QTCaptureDevice * cam = [QTCaptureDevice defaultInputDeviceWithMediaType: QTMediaTypeVideo];
+    if (! cam) {
+        cam = [QTCaptureDevice defaultInputDeviceWithMediaType: QTMediaTypeMuxed];
+    }
+    return cam;
+}
+
+QTCaptureDevice * QTKitCapture::camDevice(const char* uid)
+{
+    if (! uid) {
+        return defaultCamDevice();
+    }
+    LOG4CPP_INFO(logger, "Requesting uid " << uid);
+
+    // then find the rest
+    NSArray* devices = [QTCaptureDevice inputDevicesWithMediaType: QTMediaTypeVideo];
+    NSEnumerator *enumerator = [devices objectEnumerator];
+
+    QTCaptureDevice* value;
+    while (value = ((QTCaptureDevice*) [enumerator nextObject])) {	// while not nil
+        const char * cuid = [[ value uniqueID ] UTF8String ];
+        if (cuid && ( strcmp( uid, cuid ) == 0)) {
+            return value;
+        }}
+
+    devices = [QTCaptureDevice inputDevicesWithMediaType:QTMediaTypeMuxed];
+    enumerator = [devices objectEnumerator];
+    while (value = ((QTCaptureDevice*) [enumerator nextObject])) {	// while not nil
+        const char * cuid = [[ value uniqueID ] UTF8String ];
+        if (cuid && ( strcmp( uid, cuid ) == 0)) {
+            return value;
+        }}
+    LOG4CPP_ERROR( logger, "QTKit didn't find Video Input Device!" );
+    return NULL;
+}
+
+void QTKitCapture::configureOutput ()
+{
+
+    NSDictionary *pixelBufferOptions;
+    if (m_width > 0 && m_height > 0) {
+        pixelBufferOptions = [NSDictionary dictionaryWithObjectsAndKeys: [NSNumber numberWithDouble: 1.0 * m_width], (id) kCVPixelBufferWidthKey,
+        [NSNumber numberWithDouble: 1.0 * m_height], (id) kCVPixelBufferHeightKey,
+        //[NSNumber numberWithUnsignedInt:k32BGRAPixelFormat], (id)kCVPixelBufferPixelFormatTypeKey,
+        [NSNumber numberWithUnsignedInt: kCVPixelFormatType_32BGRA], (id) kCVPixelBufferPixelFormatTypeKey, nil];
     } else {
-        LOG4CPP_ERROR( logger, "QTKit no device." );
-        [localpool drain];
-        return;
+        pixelBufferOptions = [NSDictionary dictionaryWithObjectsAndKeys: [NSNumber numberWithUnsignedInt: kCVPixelFormatType_32BGRA], (id) kCVPixelBufferPixelFormatTypeKey, nil];
+    }
+    [mCaptureDecompressedVideoOutput setPixelBufferAttributes: pixelBufferOptions];
+
+#if QTKIT_VERSION_MAX_ALLOWED >= QTKIT_VERSION_7_6_3
+    [mCaptureDecompressedVideoOutput setAutomaticallyDropsLateVideoFrames: YES];
+#endif
+
+
+    // These require > 10.5, and a QTCaptureDecompressedVideoOutput
+    @try {
+//  no attribute for fps yet
+//        [mCaptureDecompressedVideoOutput setMinimumVideoFrameInterval: (targetFrameInterval * 0.999) ];
+        [mCaptureDecompressedVideoOutput setAutomaticallyDropsLateVideoFrames: YES];
+    } @catch (id theException) {
+        LOG4CPP_ERROR(logger, "No video-source rate control here.");
     }
 }
 
-
-QTKitCapture::~QTKitCapture()
+void QTKitCapture::destroySession ()
 {
-    NSAutoreleasePool* localpool = [[NSAutoreleasePool alloc] init];
+    LOG4CPP_INFO( logger, "Camera session ends.");
+    if (mCaptureSession) {
+        if ([mCaptureSession isRunning]) [mCaptureSession stopRunning ];
+        if (mCaptureDecompressedVideoOutput) [mCaptureSession removeOutput: mCaptureDecompressedVideoOutput ];
+        if (mCaptureDeviceInput) [ mCaptureSession removeInput: mCaptureDeviceInput ];
 
-    if (m_running) {
-        [mCaptureSession stopRunning];
+        [mCaptureSession release];
+        mCaptureSession = nil;
+    }
+    if (mCaptureDeviceInput) {
+        [mCaptureDeviceInput release];
+        mCaptureDeviceInput = nil;
+    }
+    if (mCaptureDecompressedVideoOutput) {
+        [mCaptureDecompressedVideoOutput release];
+        mCaptureDecompressedVideoOutput = nil;
+    }
+    if (m_CaptureDelegate) {
+        [m_CaptureDelegate
+        release];
+        m_CaptureDelegate = nil;
     }
 
-    QTCaptureDevice *device = [mCaptureDeviceInput device];
-    if ([device isOpen])  [device close];
-
-    [mCaptureSession release];
-    [mCaptureDeviceInput release];
-
-    [mCaptureDecompressedVideoOutput setDelegate:mCaptureDecompressedVideoOutput];
-    [mCaptureDecompressedVideoOutput release];
-    [capture release];
-    [localpool drain];
+    if (mCaptureDevice) {
+        LOG4CPP_INFO( logger, "Closing camera " << [[mCaptureDevice localizedDisplayName] UTF8String]);
+        if ([mCaptureDevice isOpen]) [mCaptureDevice close];
+        [mCaptureDevice release];
+        mCaptureDevice = nil;
+    }
 }
 
 void QTKitCapture::start()
 {
     if ( !m_running ) {
-        NSAutoreleasePool * localpool = [[NSAutoreleasePool alloc] init];
-        [mCaptureSession startRunning];
-        [localpool drain];
+        m_Thread.reset( new boost::thread( boost::bind( &QTKitCapture::ThreadProc, this ) ) );
+
+        // run the main-loop until the capture thread is ready
+        // then he'll maintain the loop until stop is requested
+        double sleepTime = 0.005;
+
+        // If the capture is launched in a separate thread, then
+        // [NSRunLoop currentRunLoop] is not the same as in the main thread, and has no timer.
+        //see https://developer.apple.com/library/mac/#documentation/Cocoa/Reference/Foundation/Classes/nsrunloop_Class/Reference/Reference.html
+        // "If no input sources or timers are attached to the run loop, this
+        // method exits immediately"
+        // using usleep() is not a good alternative, because it may block the GUI.
+        // Create a dummy timer so that runUntilDate does not exit immediately:
+        [NSTimer scheduledTimerWithTimeInterval:100 target:nil selector:@selector(doFireTimer:) userInfo:nil repeats:YES];
+        while (!m_bCaptureThreadReady) {
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:sleepTime]];
+        }
+
     }
     Component::start();
 }
@@ -350,29 +449,69 @@ void QTKitCapture::start()
 
 void QTKitCapture::stop()
 {
-    if ( !m_running ) {
-        NSAutoreleasePool * localpool = [[NSAutoreleasePool alloc] init];
-        [mCaptureSession stopRunning];
-        [localpool drain];
+    if ( m_running ) {
+        if ( m_Thread )
+        {
+            m_bStop = true;
+            m_Thread->join();
+        }
     }
 }
 
-void QTKitCapture::sendImage(Ubitrack::Measurement::Timestamp timeStamp, IplImage* image) {
-    
-    boost::shared_ptr< Vision::Image > pColorImage;
-    pColorImage.reset(new Vision::Image(image->width, image->height, 3 ) );
 
-    cvCvtColor(image, *pColorImage, CV_BGRA2BGR);
-    pColorImage->channelSeq[0] = 'B';
-    pColorImage->channelSeq[1] = 'G';
-    pColorImage->channelSeq[2] = 'R';
-    
-    pColorImage = m_undistorter->undistort( pColorImage );
-    
-    if ( m_colorOutPort.isConnected() )
-        m_colorOutPort.send( Measurement::ImageMeasurement( timeStamp, pColorImage ) );
-    if ( m_outPort.isConnected() )
-        m_outPort.send( Measurement::ImageMeasurement( timeStamp, pColorImage->CvtColor( CV_RGB2GRAY, 1 ) ) );
+void QTKitCapture::receiveFrame(void *pixelBufferBase, size_t width, size_t height, size_t size, Ubitrack::Measurement::Timestamp timestamp) {
+
+    if (size != 0) {
+        Vision::Image bufferImage( width, height, 4, pixelBufferBase, IPL_DEPTH_8U, 1 );
+//        Measurement::Timestamp utTime = m_syncer.convertNativeToLocal( timestamp );
+
+        boost::shared_ptr<Vision::Image> pColorImage = bufferImage.CvtColor(CV_BGRA2BGR, 3);
+        pColorImage->channelSeq[0] = 'B';
+        pColorImage->channelSeq[1] = 'G';
+        pColorImage->channelSeq[2] = 'R';
+
+        pColorImage = m_undistorter->undistort( pColorImage );
+
+        if ( m_colorOutPort.isConnected() )
+            m_colorOutPort.send( Measurement::ImageMeasurement( timestamp, pColorImage ) );
+        if ( m_outPort.isConnected() )
+            m_outPort.send( Measurement::ImageMeasurement( timestamp, pColorImage->CvtColor( CV_RGB2GRAY, 1 ) ) );
+    }
+}
+
+void QTKitCapture::ThreadProc() {
+
+    initializeCamera();
+
+    if (mCaptureSession) {
+        if (! [mCaptureSession isRunning]) {
+            LOG4CPP_INFO(logger, "Start QTKit Capturing.");
+            configureOutput();
+            [ mCaptureSession startRunning ];
+        }
+    } else {
+        LOG4CPP_ERROR( logger, "Run: no session to run.");
+        return;
+    }
+
+    m_bCaptureThreadReady = true;
+
+    double sleepTime = 0.005;
+
+    // If the capture is launched in a separate thread, then
+    // [NSRunLoop currentRunLoop] is not the same as in the main thread, and has no timer.
+    //see https://developer.apple.com/library/mac/#documentation/Cocoa/Reference/Foundation/Classes/nsrunloop_Class/Reference/Reference.html
+    // "If no input sources or timers are attached to the run loop, this
+    // method exits immediately"
+    // using usleep() is not a good alternative, because it may block the GUI.
+    // Create a dummy timer so that runUntilDate does not exit immediately:
+    [NSTimer scheduledTimerWithTimeInterval:100 target:nil selector:@selector(doFireTimer:) userInfo:nil repeats:YES];
+    while (!m_bStop) {
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:sleepTime]];
+    }
+
+    LOG4CPP_INFO(logger, "Stop QTKit Capturing.");
+    [mCaptureSession stopRunning];
 
 }
 
@@ -381,14 +520,12 @@ void QTKitCapture::sendImage(Ubitrack::Measurement::Timestamp timeStamp, IplImag
 
 // implementation of delegate
 
-@implementation CaptureDelegate
+@implementation UTCaptureDelegate
 
 - (id)init {
+    LOG4CPP_INFO(logger, "Initialize QTKit delegate.");
     self = [super init];
     if (self) {
-        imagedata = NULL;
-        currSize = 0;
-        image = NULL;
         _owner = NULL;
     }
     return self;
@@ -396,8 +533,7 @@ void QTKitCapture::sendImage(Ubitrack::Measurement::Timestamp timeStamp, IplImag
 
 
 -(void)dealloc {
-    if (imagedata != NULL) free(imagedata);
-    cvReleaseImage(&image);
+    _owner = NULL;
     [super dealloc];
 }
 
@@ -405,83 +541,45 @@ void QTKitCapture::sendImage(Ubitrack::Measurement::Timestamp timeStamp, IplImag
         didOutputVideoFrame:(CVImageBufferRef)videoFrame
         withSampleBuffer:(QTSampleBuffer *)sampleBuffer
         fromConnection:(QTCaptureConnection *)connection {
-    (void)captureOutput;
-    (void)sampleBuffer;
-    (void)connection;
 
-    CVBufferRetain(videoFrame);
-    CVImageBufferRef imageBufferToRelease  = mCurrentImageBuffer;
-
-
-    // optimize START
+    LOG4CPP_TRACE(logger, "QTKit received image.");
 
     @synchronized (self) {
-        mCurrentImageBuffer = videoFrame;
-    }
+        // get timestamp early
+        Ubitrack::Measurement::Timestamp timestamp = Ubitrack::Measurement::now();
 
-    CVBufferRelease(imageBufferToRelease);
-
-    // send measurement here
-    CVPixelBufferRef pixels;
-
-    @synchronized (self){
-        pixels = CVBufferRetain(mCurrentImageBuffer);
-    }
-
-    // optimize Stop
-
-
-    // get timestamp early
-    Ubitrack::Measurement::Timestamp timestamp = Ubitrack::Measurement::now();
-
-    CVPixelBufferLockBaseAddress(pixels, 0);
-    uint32_t* baseaddress = (uint32_t*)CVPixelBufferGetBaseAddress(pixels);
-
-    size_t width = CVPixelBufferGetWidth(pixels);
-    size_t height = CVPixelBufferGetHeight(pixels);
-    size_t rowBytes = CVPixelBufferGetBytesPerRow(pixels);
-
-    if (rowBytes != 0) {
-
-        if (currSize != rowBytes*height*sizeof(char)) {
-            currSize = rowBytes*height*sizeof(char);
-            if (imagedata != NULL) free(imagedata);
-            imagedata = (char*)malloc(currSize);
+        void* base;
+        size_t size, width, height;
+        if (CVPixelBufferLockBaseAddress(videoFrame, 0)) {
+            LOG4CPP_ERROR(logger, "Cannot lock frame buffer.");
+            return;
         }
 
-        memcpy(imagedata, baseaddress, currSize);
+        // Get info about the raw pixel-buffer data.
+        base = (void*) CVPixelBufferGetBaseAddress(videoFrame);
+        width = CVPixelBufferGetWidth(videoFrame);
+        height = CVPixelBufferGetHeight(videoFrame);
+        size = height * CVPixelBufferGetBytesPerRow(videoFrame);
 
-        if (image == NULL) {
-            image = cvCreateImageHeader(cvSize((int)width,(int)height), IPL_DEPTH_8U, 4);
-        }
+        double nsinterval;
+        QTGetTimeInterval ([sampleBuffer decodeTime], & nsinterval);
 
-        image->width = (int)width;
-        image->height = (int)height;
-        image->nChannels = 4;
-        image->depth = IPL_DEPTH_8U;
-        image->widthStep = (int)rowBytes;
-        image->imageData = imagedata;
-        image->imageSize = (int)currSize;
-
-        // here we need to send the image
         if (_owner != NULL) {
-            _owner->sendImage(timestamp, image);
+            _owner->receiveFrame (base, width, height, size, timestamp);
         }
 
+        // We're done with the pixel-buffer
+        CVPixelBufferUnlockBaseAddress(videoFrame, 0);
     }
-
-    CVPixelBufferUnlockBaseAddress(pixels, 0);
-    CVBufferRelease(pixels);
-
 
 }
 
 - (void)captureOutput:(QTCaptureOutput *)captureOutput
         didDropVideoFrameWithSampleBuffer:(QTSampleBuffer *)sampleBuffer
         fromConnection:(QTCaptureConnection *)connection {
-    (void)captureOutput;
-    (void)sampleBuffer;
-    (void)connection;
+//    (void)captureOutput;
+//    (void)sampleBuffer;
+//    (void)connection;
     LOG4CPP_ERROR( logger, "Camera dropped frame!" );
 }
 
@@ -489,9 +587,9 @@ void QTKitCapture::sendImage(Ubitrack::Measurement::Timestamp timeStamp, IplImag
 #pragma mark Public methods
 
 - (void)registerOwner:(Ubitrack::Drivers::QTKitCapture*)owner {
-    [_lock lock];
-    _owner = owner;
-    [_lock unlock];
+    @synchronized (self) {
+        _owner = owner;
+    }
 }
 
 
