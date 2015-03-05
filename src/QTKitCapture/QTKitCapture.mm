@@ -254,25 +254,52 @@ void QTKitCapture::initializeCamera() {
     mCaptureDecompressedVideoOutput = nil;
     m_CaptureDelegate = nil;
 
-    // need uid
-    const char* uid = NULL;
-    if (m_cameraUUID != "") {
-        uid = m_cameraUUID.c_str();
+    // need uid - somethimes parts of uuid change, need to strmatch the uuid
+//    const char* uid = NULL;
+//    if (m_cameraUUID != "") {
+//        uid = m_cameraUUID.c_str();
+//    }
+
+    NSArray* devices = [[[QTCaptureDevice inputDevicesWithMediaType:QTMediaTypeVideo]
+                          arrayByAddingObjectsFromArray:[QTCaptureDevice inputDevicesWithMediaType:QTMediaTypeMuxed]] retain];
+
+    if ([devices count] == 0) {
+        LOG4CPP_ERROR( logger, "QTKit didn't find any attached Video Input Devices!" );
+        return;
     }
 
+    QTCaptureDevice *device = NULL;
+    NSUInteger nCameras = [devices count];
+    NSString* uid = [NSString stringWithCString:m_cameraUUID.c_str()];
+    for (int i = 0; i < nCameras; ++i) {
+        device = [devices objectAtIndex:i];
+
+        LOG4CPP_INFO(logger, "Found camera: "
+                << ([[device localizedDisplayName] UTF8String])
+                << " UUID "<< ([[device uniqueID] UTF8String]));
+
+        if ([[device uniqueID] rangeOfString:uid].location != NSNotFound) {
+            uid = [device uniqueID];
+            break;
+        }
+    }
+
+    [devices release];
+    [device release];
+
     mCaptureSession = [[QTCaptureSession alloc] init];
-    mCaptureDevice = camDevice(uid);
+    mCaptureDevice = camDevice([uid UTF8String]);
     if (! mCaptureDevice ) {
         [mCaptureSession release];
         mCaptureSession = nil;
         return;
     }
-
     [mCaptureDevice retain];
 
-    LOG4CPP_INFO(logger, "Got camera: "
-            << ([[mCaptureDevice localizedDisplayName] UTF8String])
-            << " UUID "<< ([[mCaptureDevice uniqueID] UTF8String]));
+    LOG4CPP_INFO(logger, "Selected camera: "
+            << ([[device localizedDisplayName] UTF8String])
+            << " UUID "<< ([[device uniqueID] UTF8String]));
+
 
     int success;
     NSError* error;
@@ -462,7 +489,7 @@ void QTKitCapture::stop()
 void QTKitCapture::receiveFrame(void *pixelBufferBase, size_t width, size_t height, size_t size, Ubitrack::Measurement::Timestamp timestamp) {
 
     if (size != 0) {
-        Vision::Image bufferImage( width, height, 4, pixelBufferBase, IPL_DEPTH_8U, 1 );
+        Vision::Image bufferImage( width, height, 4, pixelBufferBase, IPL_DEPTH_8U, 0 );
 //        Measurement::Timestamp utTime = m_syncer.convertNativeToLocal( timestamp );
 
         boost::shared_ptr<Vision::Image> pColorImage = bufferImage.CvtColor(CV_BGRA2BGR, 3);
