@@ -142,7 +142,7 @@ public:
 	Measurement::Matrix3x3 getIntrinsic( Measurement::Timestamp t )
 	{
 		if (m_undistorter) {
-			return Measurement::Matrix3x3( t, m_undistorter->getIntrinsics() );
+			return Measurement::Matrix3x3( t, m_undistorter->getMatrix() );
 		} else {
 			UBITRACK_THROW( "No undistortion configured for QTKitCapture" );
 		}
