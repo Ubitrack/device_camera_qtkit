@@ -493,9 +493,9 @@ void QTKitCapture::receiveFrame(void *pixelBufferBase, size_t width, size_t heig
 //        Measurement::Timestamp utTime = m_syncer.convertNativeToLocal( timestamp );
 
         boost::shared_ptr<Vision::Image> pColorImage = bufferImage.CvtColor(CV_BGRA2BGR, 3);
-        pColorImage->channelSeq[0] = 'B';
-        pColorImage->channelSeq[1] = 'G';
-        pColorImage->channelSeq[2] = 'R';
+        pColorImage->iplImage()->channelSeq[0] = 'B';
+        pColorImage->iplImage()->channelSeq[1] = 'G';
+        pColorImage->iplImage()->channelSeq[2] = 'R';
 
         pColorImage = m_undistorter->undistort( pColorImage );
 
