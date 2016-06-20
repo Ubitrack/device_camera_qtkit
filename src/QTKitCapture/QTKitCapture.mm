@@ -38,7 +38,10 @@
 #include <strstream>
 #include <log4cpp/Category.hh>
 
-#import <QTKit/QTKit.h>
+#ifdef __APPLE__
+// workaround for compiling variadict templates - seems to be a compiler problem
+#define BOOST_NO_CXX11_VARIADIC_TEMPLATES
+#endif
 
 #include <boost/thread.hpp>
 #include <boost/bind.hpp>
@@ -54,6 +57,8 @@
 #include <utVision/Image.h>
 #include <utVision/Undistortion.h>
 #include <opencv/cv.h>
+
+#import <QTKit/QTKit.h>
 
 #ifndef QTKIT_VERSION_7_6_3
 #define QTKIT_VERSION_7_6_3         70603
