@@ -57,6 +57,8 @@
 #include <utVision/Image.h>
 #include <utVision/Undistortion.h>
 #include <opencv/cv.h>
+#include <utVision/OpenCLManager.h>
+
 
 #import <QTKit/QTKit.h>
 
@@ -187,6 +189,9 @@ protected:
 	// shift timestamps (ms)
 	int m_timeOffset;
 
+    /** automatic upload of images to the GPU*/
+    bool m_autoGPUUpload;
+
     // thread main loop
     void ThreadProc();
 
@@ -227,6 +232,7 @@ QTKitCapture::QTKitCapture( const std::string& sName, boost::shared_ptr< Graph::
     , mCaptureDevice(NULL)
     , m_CaptureDelegate(NULL)
     , m_imageBuffer(NULL)
+    , m_autoGPUUpload(false)
 {
     m_cameraUUID = subgraph->m_DataflowAttributes.getAttributeString( "cameraUUID" );
 	subgraph->m_DataflowAttributes.getAttributeData( "width", m_width );
@@ -238,6 +244,15 @@ QTKitCapture::QTKitCapture( const std::string& sName, boost::shared_ptr< Graph::
 	}
 
 	subgraph->m_DataflowAttributes.getAttributeData( "timeOffset", m_timeOffset );
+
+
+    Vision::OpenCLManager& oclManager = Vision::OpenCLManager::singleton();
+    if (oclManager.isEnabled()) {
+        if (subgraph->m_DataflowAttributes.hasAttribute("uploadImageOnGPU")){
+            m_autoGPUUpload = subgraph->m_DataflowAttributes.getAttributeString("uploadImageOnGPU") == "true";
+            LOG4CPP_INFO(logger, "Upload to GPU enabled? " << m_autoGPUUpload);
+        }
+    }
 
 	std::string intrinsicFile = subgraph->m_DataflowAttributes.getAttributeString( "intrinsicMatrixFile" );
 	std::string distortionFile = subgraph->m_DataflowAttributes.getAttributeString( "distortionFile" );
@@ -501,6 +516,15 @@ void QTKitCapture::receiveFrame(void *pixelBufferBase, size_t width, size_t heig
         pColorImage->iplImage()->channelSeq[0] = 'B';
         pColorImage->iplImage()->channelSeq[1] = 'G';
         pColorImage->iplImage()->channelSeq[2] = 'R';
+
+        if (m_autoGPUUpload){
+            Vision::OpenCLManager& oclManager = Vision::OpenCLManager::singleton();
+            if (oclManager.isInitialized()) {
+                //force upload to the GPU
+                pColorImage->uMat();
+            }
+
+        }
 
         pColorImage = m_undistorter->undistort( pColorImage );
 
