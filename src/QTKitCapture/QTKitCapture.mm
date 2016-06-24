@@ -56,6 +56,7 @@
 #include <utMeasurement/TimestampSync.h>
 #include <utVision/Image.h>
 #include <utVision/Undistortion.h>
+#include <utUtil/OS.h>
 #include <opencv/cv.h>
 #include <utVision/OpenCLManager.h>
 
@@ -471,11 +472,22 @@ void QTKitCapture::destroySession ()
 void QTKitCapture::start()
 {
     if ( !m_running ) {
-        m_Thread.reset( new boost::thread( boost::bind( &QTKitCapture::ThreadProc, this ) ) );
 
         // run the main-loop until the capture thread is ready
         // then he'll maintain the loop until stop is requested
         double sleepTime = 0.005;
+
+        // @todo Check if this really makes sense for cases where no Rendering is done in ubitrack!!!
+//        if (m_autoGPUUpload){
+            LOG4CPP_DEBUG(logger, "QTKit - Waiting for OpenCLManager to be initialized.");
+            Vision::OpenCLManager& oclManager = Vision::OpenCLManager::singleton();
+            while (!oclManager.isInitialized()) {
+                Util::sleep(int(sleepTime*1000));
+            }
+            LOG4CPP_DEBUG(logger, "QTKit - OpenCLManager is initialized.");
+//        }
+
+        m_Thread.reset( new boost::thread( boost::bind( &QTKitCapture::ThreadProc, this ) ) );
 
         // If the capture is launched in a separate thread, then
         // [NSRunLoop currentRunLoop] is not the same as in the main thread, and has no timer.
@@ -512,10 +524,11 @@ void QTKitCapture::receiveFrame(void *pixelBufferBase, size_t width, size_t heig
         Vision::Image bufferImage( width, height, 4, pixelBufferBase, IPL_DEPTH_8U, 0 );
 //        Measurement::Timestamp utTime = m_syncer.convertNativeToLocal( timestamp );
 
-        boost::shared_ptr<Vision::Image> pColorImage = bufferImage.CvtColor(CV_BGRA2BGR, 3);
+        boost::shared_ptr<Vision::Image> pColorImage = bufferImage.Clone(); //bufferImage.CvtColor(CV_BGRA2BGR, 3);
         pColorImage->iplImage()->channelSeq[0] = 'B';
         pColorImage->iplImage()->channelSeq[1] = 'G';
         pColorImage->iplImage()->channelSeq[2] = 'R';
+        pColorImage->iplImage()->channelSeq[3] = 'A';
 
         if (m_autoGPUUpload){
             Vision::OpenCLManager& oclManager = Vision::OpenCLManager::singleton();
@@ -531,11 +544,13 @@ void QTKitCapture::receiveFrame(void *pixelBufferBase, size_t width, size_t heig
         if ( m_colorOutPort.isConnected() )
             m_colorOutPort.send( Measurement::ImageMeasurement( timestamp, pColorImage ) );
         if ( m_outPort.isConnected() )
-            m_outPort.send( Measurement::ImageMeasurement( timestamp, pColorImage->CvtColor( CV_RGB2GRAY, 1 ) ) );
+            m_outPort.send( Measurement::ImageMeasurement( timestamp, pColorImage->CvtColor( CV_RGBA2GRAY, 1 ) ) );
     }
 }
 
 void QTKitCapture::ThreadProc() {
+
+    double sleepTime = 0.005;
 
     initializeCamera();
 
@@ -552,7 +567,6 @@ void QTKitCapture::ThreadProc() {
 
     m_bCaptureThreadReady = true;
 
-    double sleepTime = 0.005;
 
     // If the capture is launched in a separate thread, then
     // [NSRunLoop currentRunLoop] is not the same as in the main thread, and has no timer.
