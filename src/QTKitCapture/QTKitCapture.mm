@@ -478,14 +478,14 @@ void QTKitCapture::start()
         double sleepTime = 0.005;
 
         // @todo Check if this really makes sense for cases where no Rendering is done in ubitrack!!!
-        if (m_autoGPUUpload){
+//        if (m_autoGPUUpload){
             LOG4CPP_DEBUG(logger, "QTKit - Waiting for OpenCLManager to be initialized.");
             Vision::OpenCLManager& oclManager = Vision::OpenCLManager::singleton();
             while (!oclManager.isInitialized()) {
                 Util::sleep(int(sleepTime*1000));
             }
             LOG4CPP_DEBUG(logger, "QTKit - OpenCLManager is initialized.");
-        }
+//        }
 
         m_Thread.reset( new boost::thread( boost::bind( &QTKitCapture::ThreadProc, this ) ) );
 
@@ -521,14 +521,9 @@ void QTKitCapture::stop()
 void QTKitCapture::receiveFrame(void *pixelBufferBase, size_t width, size_t height, size_t size, Ubitrack::Measurement::Timestamp timestamp) {
 
     if (size != 0) {
-        Vision::Image bufferImage( width, height, 4, pixelBufferBase, IPL_DEPTH_8U, 0 );
-//        Measurement::Timestamp utTime = m_syncer.convertNativeToLocal( timestamp );
 
-        boost::shared_ptr<Vision::Image> pColorImage = bufferImage.Clone(); //bufferImage.CvtColor(CV_BGRA2BGR, 3);
-        pColorImage->iplImage()->channelSeq[0] = 'B';
-        pColorImage->iplImage()->channelSeq[1] = 'G';
-        pColorImage->iplImage()->channelSeq[2] = 'R';
-        pColorImage->iplImage()->channelSeq[3] = 'A';
+        boost::shared_ptr<Vision::Image> pColorImage(new Image((int)width, (int)height, 4, static_cast< char* >(pixelBufferBase), IPL_DEPTH_8U, 0));
+        pColorImage->set_pixelFormat(Vision::Image::BGRA);
 
         if (m_autoGPUUpload){
             Vision::OpenCLManager& oclManager = Vision::OpenCLManager::singleton();
@@ -536,7 +531,6 @@ void QTKitCapture::receiveFrame(void *pixelBufferBase, size_t width, size_t heig
                 //force upload to the GPU
                 pColorImage->uMat();
             }
-
         }
 
         pColorImage = m_undistorter->undistort( pColorImage );
@@ -662,12 +656,7 @@ void QTKitCapture::ThreadProc() {
     }
 }
 
-
 @end
-
-
-
-
 
 UBITRACK_REGISTER_COMPONENT( Dataflow::ComponentFactory* const cf ) {
 	cf->registerComponent< Ubitrack::Drivers::QTKitCapture > ( "QTKitCapture" );
