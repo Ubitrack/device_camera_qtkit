@@ -521,9 +521,12 @@ void QTKitCapture::stop()
 void QTKitCapture::receiveFrame(void *pixelBufferBase, size_t width, size_t height, size_t size, Ubitrack::Measurement::Timestamp timestamp) {
 
     if (size != 0) {
+        if ((width == 0) || (height == 0)) {
+            LOG4CPP_WARN(logger, 'Received empty image - skipping (' << width << ',' << height << ',' << size << ').');
+            return;
+        }
 
         boost::shared_ptr<Vision::Image> pColorImage(new Image((int)width, (int)height, 4, static_cast< char* >(pixelBufferBase), IPL_DEPTH_8U, 0));
-        pColorImage->set_pixelFormat(Vision::Image::BGRA);
 
         if (m_autoGPUUpload){
             Vision::OpenCLManager& oclManager = Vision::OpenCLManager::singleton();
@@ -534,6 +537,7 @@ void QTKitCapture::receiveFrame(void *pixelBufferBase, size_t width, size_t heig
         }
 
         pColorImage = m_undistorter->undistort( pColorImage );
+        pColorImage->set_pixelFormat(Vision::Image::BGRA);
 
         if ( m_colorOutPort.isConnected() )
             m_colorOutPort.send( Measurement::ImageMeasurement( timestamp, pColorImage ) );
