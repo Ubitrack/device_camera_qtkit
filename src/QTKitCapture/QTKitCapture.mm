@@ -57,6 +57,7 @@
 #include <utVision/Image.h>
 #include <utVision/Undistortion.h>
 #include <utUtil/OS.h>
+#include <utUtil/TracingProvider.h>
 #include <opencv/cv.h>
 #include <utVision/OpenCLManager.h>
 
@@ -527,6 +528,10 @@ void QTKitCapture::receiveFrame(void *pixelBufferBase, size_t width, size_t heig
         }
 
         boost::shared_ptr<Vision::Image> pColorImage(new Image((int)width, (int)height, 4, static_cast< char* >(pixelBufferBase), IPL_DEPTH_8U, 0));
+
+#ifdef ENABLE_EVENT_TRACING
+        TRACEPOINT_MEASUREMENT_CREATE(getEventDomain(), timestamp, getName().c_str(), "VideoCapture")
+#endif
 
         if (m_autoGPUUpload){
             Vision::OpenCLManager& oclManager = Vision::OpenCLManager::singleton();
