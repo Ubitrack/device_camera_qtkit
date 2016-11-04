@@ -479,14 +479,14 @@ void QTKitCapture::start()
         double sleepTime = 0.005;
 
         // @todo Check if this really makes sense for cases where no Rendering is done in ubitrack!!!
-//        if (m_autoGPUUpload){
+        if (m_autoGPUUpload){
             LOG4CPP_DEBUG(logger, "QTKit - Waiting for OpenCLManager to be initialized.");
             Vision::OpenCLManager& oclManager = Vision::OpenCLManager::singleton();
             while (!oclManager.isInitialized()) {
                 Util::sleep(int(sleepTime*1000));
             }
             LOG4CPP_DEBUG(logger, "QTKit - OpenCLManager is initialized.");
-//        }
+        }
 
         m_Thread.reset( new boost::thread( boost::bind( &QTKitCapture::ThreadProc, this ) ) );
 
